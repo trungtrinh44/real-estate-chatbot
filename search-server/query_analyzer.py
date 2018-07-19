@@ -18,18 +18,11 @@ logger = logging.getLogger('query-analyzer')
 logger.setLevel(logging.WARNING)
 app = Flask(__name__)
 CORS(app)
-model_url = "http://ree-service:5000/api/v1/real-estate-extraction"
-database_url = "mongodb://main_admin:abc123@mongod-0.mongodb-service.default.svc.cluster.local:27017,mongod-1.mongodb-service.default.svc.cluster.local:27017,mongod-2.mongodb-service.default.svc.cluster.local:27017"
-# database_url = "mongodb://main_admin:abc123@mongod-2.mongodb-service.default.svc.cluster.local:27017"
-coll = MongoReplicaSetClient(database_url)["real-estate"]["post_prod"]
-# model_url = "http://35.202.199.34:5000/api/v1/real-estate-extraction"
-# database_url = "10.211.55.101:27017"
-# db = MongoClient(database_url)["real-estate"]
-# coll = db["post_prod_no_abbr_short"]
-# freq_coll = db["freq-itemset-prod"]
-# addr_pattern = re.compile(r"^.*\|addr_.*$")
-# addr_regex = Regex.from_native(addr_pattern)
-# addr_regex.flags ^= re.UNICODE
+model_url = "http://0.0.0.0:5000/api/v1/real-estate-extraction"
+database_url = "10.211.55.101:27017"
+db = MongoClient(database_url)["real-estate"]
+coll = db["post_prod_no_abbr_short"]
+
 WEIGHTS = {
     "potential": 12,
     "surrounding": 10,
@@ -65,8 +58,7 @@ def normalize_tags(tags):
     for k, v in tags.items():
         if k == 'orientation' or k == 'legal' or k == 'transaction_type' or k == 'realestate_type' \
                 or k == 'addr_ward' or k == 'addr_district' or k == 'addr_city' or k == 'position':
-            # norm_val[k] = list(set('{}|{}'.format('_'.join(x.split()), k)
-            #                        for l in v for x in FUNCTIONS[k](l)))
+
             norm_val[k] = list(set('_'.join(x.split())
                                    for l in v for x in FUNCTIONS[k](l)))
         elif k == 'interior_floor' or k == 'interior_room' or k == 'area' or k == 'price':
@@ -113,8 +105,7 @@ def analyze_query():
         limit = req.get('limit', 50)
         skip = req.get('skip', 0)
     tags = {}
-    # surrounding = set()
-    # surrounding_name = set()
+
     for chunk in raw_tags:
         t = chunk['type']
         c = chunk['content']
@@ -124,46 +115,10 @@ def analyze_query():
             tags[t] = []
         c = c.lower().strip()
         tags[t].append(c)
-        # if t == 'surrounding':
-        #     surrounding.add('{}|surrounding'.format(
-        #         '_'.join(remove_accents(c).split())
-        #     ))
-        # elif t == 'surrounding_name':
-        #     surrounding_name.add('{}|surrounding_name'.format(
-        #         '_'.join(remove_accents(c).split())
-        #     ))
-    # freq_tags = set()
-    # for x in product(surrounding, surrounding_name):
-    #     print(x)
-    #     cur = freq_coll.find({
-    #         'items': {'$all': list(x), '$regex': addr_regex, '$size': 3}
-    #     }).sort('freq', -1).limit(20)
-    #     freq_tags.update(i for y in cur for i in y['items'] if i not in x)
-    # print(freq_tags)
+
     norm_tags = normalize_tags(tags)
-    # need_expanding = []
-    # for k, v in tags.items():
-    #     if k.startswith('surrounding') or k == 'potential' or k == 'project':
-    #         need_expanding.extend('{}|{}'.format(
-    #             '_'.join(x.split()), k) for x in v)
-    # res = requests.post(expand_url, json={
-    #     'data': need_expanding,
-    #     "max_distance": 4, "min_lcs": 10, "num_candidate": 13
-    # }).json()
-    # temp = set(remove_accents(x) for l in res for x in l)
-    # expanded_tags = {}
-    # for chunk in temp:
-    #     t = chunk.split('|')[-1]
-    #     if expanded_tags.get(t) is None:
-    #         expanded_tags[t] = []
-    #     expanded_tags[t].append(chunk)
-    # print(norm_tags)
-    # pprint.pprint(expanded_tags)
-    final_tags = norm_tags  # {}
-    # for k in norm_tags:
-    #     final_tags[k] = norm_tags[k]
-    #     if expanded_tags.get(k):
-    #         final_tags[k].extend(expanded_tags[k])
+
+    final_tags = norm_tags
     if final_tags.get('transaction_type'):
         final_tags['transaction_type'] = [
             'cho_thue' if x == 'can_thue' else
@@ -191,20 +146,18 @@ def analyze_query():
                             {
                                 "$gt": ["$norm_val.{}".format(k), None]
                             },
-                            # {
-                            #     "$or": [
+                            
                             {
                                 "$in": [x, "$norm_val.{}".format(k)]
                             }
-                            #     ]
-                            # }
+                            
                         ]
                     },
                     WEIGHTS[k],
                     0
                 ]
             } for x in v)
-            # text_search.update(remove_accents(x) for x in v)
+
         elif k == 'price':
             match.append({
                 "norm_val.{}".format(k): {
@@ -252,13 +205,7 @@ def analyze_query():
                 }
             })
     query = []
-    # if len(text_search) > 0:
-    #     query.append({
-    #         "$match": {"$text": {"$search": " ".join(re.sub(r"\W+|_", "", v) for v in text_search)}}
-    #     })
-    # query.extend({
-    #     "$match": item
-    # } for item in match)
+
     if len(match) > 0:
         query.append({
             "$match": {
@@ -297,43 +244,16 @@ def analyze_query():
         }
     else:
         project["score"] = {"$add": [0]}
-    # if len(text_search) > 0:
-    #     project["score"] = {"$meta": "textScore"}
+
     query.append({"$project": project})
-    # c, score = project.get("c"), project.get("score")
-    # if c and score:
-    #     final_score = {"$add": ["$c", "$score"]}
-    #     query.append({"$project": {
-    #         "_id": 1,
-    #         "content": 1,
-    #         "title": 1,
-    #         'norm_val': 1,
-    #         "score": final_score,
-    #         "date": 1
-    #     }})
-    #     query.append({"$sort": {"score": -1, "date": -1}})
-    # elif c:
-    #     query.append({"$project": {
-    #         "_id": 1,
-    #         "content": 1,
-    #         "title": 1,
-    #         'norm_val': 1,
-    #         "score": "$c",
-    #         "date": 1
-    #     }})
+
     query.append({"$sort": {"score": -1, "date": -1}})
-    # elif score:
-    #     query.append({"$sort": {"score": -1, "date": -1}})
-    # else:
-    #     query.append({"$sort": {"date": -1}})
+
     query.append({'$skip': skip})
     query.append({"$limit": limit})
     with open('query.json', 'w') as out:
         json.dump(query, out, indent=2)
-    # pprint.pprint(query)
-    # logger.info(query)
-    # pprint.pprint(norm_tags)
-    # pprint.pprint(tags)
+
     for _ in range(60):
         try:
             res = [x for x in coll.aggregate(query)]
@@ -350,5 +270,4 @@ def analyze_query():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=4774)
-    # query = "Cần mua nhà sổ đỏ chính chủ có 1-6 phòng ngủ và diện tích từ 10m2 đến 200m2 đường võ văn tần gần trường kiến thiết"
-    # analyze_query(query, model_url, expand_url)
+
