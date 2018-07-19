@@ -1,0 +1,1 @@
+Read the example data in test and train folder and make sure that your data also adhere to the schema.

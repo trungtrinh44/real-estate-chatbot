@@ -4,3 +4,4 @@ real-estate-extraction/gcloud
 *.pkl
 *.pb
 variables.*
+.vscode
