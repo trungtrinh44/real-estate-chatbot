@@ -1,0 +1,5 @@
+tensorflow==1.4
+keras
+gunicorn
+flask
+flask_cors

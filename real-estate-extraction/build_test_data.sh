@@ -1,0 +1,1 @@
+python data_utils/process_train_data.py --output='output/test' --input='data/test'

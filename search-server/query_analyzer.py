@@ -1,0 +1,354 @@
+import json
+import pprint
+import re
+import time
+from itertools import product
+import logging
+
+import requests
+from bson.regex import Regex
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+from pymongo import MongoReplicaSetClient, MongoClient
+from pymongo.errors import AutoReconnect
+
+from normalize_utils import FUNCTIONS, remove_accents
+
+logger = logging.getLogger('query-analyzer')
+logger.setLevel(logging.WARNING)
+app = Flask(__name__)
+CORS(app)
+model_url = "http://ree-service:5000/api/v1/real-estate-extraction"
+database_url = "mongodb://main_admin:abc123@mongod-0.mongodb-service.default.svc.cluster.local:27017,mongod-1.mongodb-service.default.svc.cluster.local:27017,mongod-2.mongodb-service.default.svc.cluster.local:27017"
+# database_url = "mongodb://main_admin:abc123@mongod-2.mongodb-service.default.svc.cluster.local:27017"
+coll = MongoReplicaSetClient(database_url)["real-estate"]["post_prod"]
+# model_url = "http://35.202.199.34:5000/api/v1/real-estate-extraction"
+# database_url = "10.211.55.101:27017"
+# db = MongoClient(database_url)["real-estate"]
+# coll = db["post_prod_no_abbr_short"]
+# freq_coll = db["freq-itemset-prod"]
+# addr_pattern = re.compile(r"^.*\|addr_.*$")
+# addr_regex = Regex.from_native(addr_pattern)
+# addr_regex.flags ^= re.UNICODE
+WEIGHTS = {
+    "potential": 12,
+    "surrounding": 10,
+    "surrounding_characteristics": 8,
+    "surrounding_name": 20
+}
+
+
+@app.route('/')
+def index():
+    return "Index API"
+
+# HTTP Errors handlers
+
+
+@app.errorhandler(404)
+def url_error(e):
+    return """
+    Wrong URL!
+    <pre>{}</pre>""".format(e), 404
+
+
+@app.errorhandler(500)
+def server_error(e):
+    return """
+    An internal error occurred: <pre>{}</pre>
+    See logs for full stacktrace.
+    """.format(e), 500
+
+
+def normalize_tags(tags):
+    norm_val = {}
+    for k, v in tags.items():
+        if k == 'orientation' or k == 'legal' or k == 'transaction_type' or k == 'realestate_type' \
+                or k == 'addr_ward' or k == 'addr_district' or k == 'addr_city' or k == 'position':
+            # norm_val[k] = list(set('{}|{}'.format('_'.join(x.split()), k)
+            #                        for l in v for x in FUNCTIONS[k](l)))
+            norm_val[k] = list(set('_'.join(x.split())
+                                   for l in v for x in FUNCTIONS[k](l)))
+        elif k == 'interior_floor' or k == 'interior_room' or k == 'area' or k == 'price':
+            for l in v:
+                a = FUNCTIONS[k](l)
+                if type(a) == dict:
+                    if norm_val.get(k) is None:
+                        norm_val[k] = {}
+                    for ka, va in a.items():
+                        if norm_val[k].get(ka) is None:
+                            norm_val[k][ka] = set()
+                        norm_val[k][ka].update(json.dumps(sva) for sva in va)
+                elif type(a) == list:
+                    if norm_val.get(k) is None:
+                        norm_val[k] = set()
+                    norm_val[k].update(json.dumps(va) for va in a)
+            if type(norm_val[k]) == dict:
+                for kk in norm_val[k]:
+                    norm_val[k][kk] = list(json.loads(vk)
+                                           for vk in norm_val[k][kk])
+            else:
+                norm_val[k] = list(json.loads(vk) for vk in norm_val[k])
+        else:
+            norm_val[k] = list(set('_'.join(x.split()) for x in v))
+    return norm_val
+
+
+@app.route('/api/v1/posts', methods=['POST'])
+def analyze_query():
+    req = request.json
+    if isinstance(req, str):
+        query = req
+        limit = 50
+        skip = 0
+        res = requests.post(model_url, json=[query]).json()[0]
+        raw_tags = res['tags']
+    else:
+        if req.get('string', True):
+            query = req['query']
+            res = requests.post(model_url, json=[query]).json()[0]
+            raw_tags = res['tags']
+        else:
+            raw_tags = req['tags']
+        limit = req.get('limit', 50)
+        skip = req.get('skip', 0)
+    tags = {}
+    # surrounding = set()
+    # surrounding_name = set()
+    for chunk in raw_tags:
+        t = chunk['type']
+        c = chunk['content']
+        if t == 'normal':
+            continue
+        if tags.get(t) is None:
+            tags[t] = []
+        c = c.lower().strip()
+        tags[t].append(c)
+        # if t == 'surrounding':
+        #     surrounding.add('{}|surrounding'.format(
+        #         '_'.join(remove_accents(c).split())
+        #     ))
+        # elif t == 'surrounding_name':
+        #     surrounding_name.add('{}|surrounding_name'.format(
+        #         '_'.join(remove_accents(c).split())
+        #     ))
+    # freq_tags = set()
+    # for x in product(surrounding, surrounding_name):
+    #     print(x)
+    #     cur = freq_coll.find({
+    #         'items': {'$all': list(x), '$regex': addr_regex, '$size': 3}
+    #     }).sort('freq', -1).limit(20)
+    #     freq_tags.update(i for y in cur for i in y['items'] if i not in x)
+    # print(freq_tags)
+    norm_tags = normalize_tags(tags)
+    # need_expanding = []
+    # for k, v in tags.items():
+    #     if k.startswith('surrounding') or k == 'potential' or k == 'project':
+    #         need_expanding.extend('{}|{}'.format(
+    #             '_'.join(x.split()), k) for x in v)
+    # res = requests.post(expand_url, json={
+    #     'data': need_expanding,
+    #     "max_distance": 4, "min_lcs": 10, "num_candidate": 13
+    # }).json()
+    # temp = set(remove_accents(x) for l in res for x in l)
+    # expanded_tags = {}
+    # for chunk in temp:
+    #     t = chunk.split('|')[-1]
+    #     if expanded_tags.get(t) is None:
+    #         expanded_tags[t] = []
+    #     expanded_tags[t].append(chunk)
+    # print(norm_tags)
+    # pprint.pprint(expanded_tags)
+    final_tags = norm_tags  # {}
+    # for k in norm_tags:
+    #     final_tags[k] = norm_tags[k]
+    #     if expanded_tags.get(k):
+    #         final_tags[k].extend(expanded_tags[k])
+    if final_tags.get('transaction_type'):
+        final_tags['transaction_type'] = [
+            'cho_thue' if x == 'can_thue' else
+            'ban' if x == 'mua' else x for x in final_tags['transaction_type'] if x != 'can_tim'
+        ]
+        if len(final_tags['transaction_type']) == 0:
+            del final_tags['transaction_type']
+    with open('final_tag.json', 'w') as out:
+        json.dump(final_tags, out, indent=1)
+    secondary = []
+    score = []
+    match = []
+    for k, v in final_tags.items():
+        if k.startswith('surrounding') or k == 'potential':
+            v = [remove_accents(re.sub(r"\W+|_", "", x)) for x in v]
+            secondary.append({
+                "norm_val.{}".format(k): {
+                    "$in": v
+                }
+            })
+            score.extend({
+                "$cond": [
+                    {
+                        "$and": [
+                            {
+                                "$gt": ["$norm_val.{}".format(k), None]
+                            },
+                            # {
+                            #     "$or": [
+                            {
+                                "$in": [x, "$norm_val.{}".format(k)]
+                            }
+                            #     ]
+                            # }
+                        ]
+                    },
+                    WEIGHTS[k],
+                    0
+                ]
+            } for x in v)
+            # text_search.update(remove_accents(x) for x in v)
+        elif k == 'price':
+            match.append({
+                "norm_val.{}".format(k): {
+                    "$elemMatch": {
+                        "$or": [
+                            {
+                                "low": {"$lte": x['high']},
+                                "high":{"$gte": x['low']}
+                            } for x in v
+                        ]
+                    }
+                }
+            })
+        elif k == 'area':
+            match.append({
+                "norm_val.{}".format(k): {
+                    "$elemMatch": {
+                        "$or": [
+                            {
+                                "low.dien tich": {"$lte": x['high']['dien tich']},
+                                "high.dien tich":{"$gte": x['low']['dien tich']}
+                            } for x in v
+                        ]
+                    }
+                }
+            })
+        elif k.startswith('interior'):
+            for k1, v1 in v.items():
+                match.append({
+                    "norm_val.{}.{}".format(k, k1): {
+                        "$elemMatch": {
+                            "$or": [
+                                {
+                                    "low": {"$lte": x['high']},
+                                    "high":{"$gte": x['low']}
+                                } for x in v1
+                            ]
+                        }
+                    }
+                })
+        else:
+            match.append({
+                "norm_val.{}".format(k): {
+                    "$in": [remove_accents(x) for x in v]
+                }
+            })
+    query = []
+    # if len(text_search) > 0:
+    #     query.append({
+    #         "$match": {"$text": {"$search": " ".join(re.sub(r"\W+|_", "", v) for v in text_search)}}
+    #     })
+    # query.extend({
+    #     "$match": item
+    # } for item in match)
+    if len(match) > 0:
+        query.append({
+            "$match": {
+                "$and": match
+            }
+        })
+    if len(secondary) > 0:
+        query.append({
+            "$match": {
+                "$or": secondary
+            }
+        })
+    rt = final_tags.get('realestate_type')
+    project = {
+        "_id": 1,
+        "content": 1,
+        "title": 1,
+        "norm_val": 1,
+        "date": 1
+    }
+    if rt is not None and "nha" in rt and len(rt) > 1:
+        score.append({
+            "$cond": [
+                {
+                    "$or": [
+                        {"$in": [x, "$norm_val.realestate_type"]} for x in rt if x != "nha"
+                    ]
+                },
+                25,
+                0
+            ]
+        })
+    if len(score) > 0:
+        project["score"] = {
+            "$add": score
+        }
+    else:
+        project["score"] = {"$add": [0]}
+    # if len(text_search) > 0:
+    #     project["score"] = {"$meta": "textScore"}
+    query.append({"$project": project})
+    # c, score = project.get("c"), project.get("score")
+    # if c and score:
+    #     final_score = {"$add": ["$c", "$score"]}
+    #     query.append({"$project": {
+    #         "_id": 1,
+    #         "content": 1,
+    #         "title": 1,
+    #         'norm_val': 1,
+    #         "score": final_score,
+    #         "date": 1
+    #     }})
+    #     query.append({"$sort": {"score": -1, "date": -1}})
+    # elif c:
+    #     query.append({"$project": {
+    #         "_id": 1,
+    #         "content": 1,
+    #         "title": 1,
+    #         'norm_val': 1,
+    #         "score": "$c",
+    #         "date": 1
+    #     }})
+    query.append({"$sort": {"score": -1, "date": -1}})
+    # elif score:
+    #     query.append({"$sort": {"score": -1, "date": -1}})
+    # else:
+    #     query.append({"$sort": {"date": -1}})
+    query.append({'$skip': skip})
+    query.append({"$limit": limit})
+    with open('query.json', 'w') as out:
+        json.dump(query, out, indent=2)
+    # pprint.pprint(query)
+    # logger.info(query)
+    # pprint.pprint(norm_tags)
+    # pprint.pprint(tags)
+    for _ in range(60):
+        try:
+            res = [x for x in coll.aggregate(query)]
+            break
+        except AutoReconnect as e:
+            logger.warning(str(e))
+            time.sleep(5)
+    return jsonify({
+        'data': res,
+        'tags': raw_tags,
+        'query': query
+    })
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=4774)
+    # query = "Cần mua nhà sổ đỏ chính chủ có 1-6 phòng ngủ và diện tích từ 10m2 đến 200m2 đường võ văn tần gần trường kiến thiết"
+    # analyze_query(query, model_url, expand_url)

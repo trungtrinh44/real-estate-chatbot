@@ -1,0 +1,7 @@
+.git
+log_dir
+trained_model
+export
+data
+output*
+gcloud
